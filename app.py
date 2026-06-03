@@ -14,6 +14,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 import os
+from aiogram.exceptions import TelegramForbiddenError
 
 from dotenv import load_dotenv
 from PIL import Image
@@ -31,6 +32,8 @@ from company_data import COMPANY_KNOWLEDGE
 import json
 import threading
 
+current_ai_provider = "gemini"
+last_gemini_error_time = None
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -242,9 +245,29 @@ async def get_gemini_vision_response(user_id: int, image_b64: str, caption: str)
         return "⚠️ Ошибка обработки фото. Попробуйте ещё раз или позвоните: +7 (777) 292-84-01"
 
 
-# Главная функция получения ответа
+# AI-ответ через Groq (быстрый, только текст)
+async def get_groq_response(user_id: int, user_text: str, history: list[dict]) -> str:
+    """Получает ответ от Groq на текстовый запрос."""
+    try:
+        resp = await groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            max_tokens=1024,
+            temperature=0.7,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
+        )
+        return resp.choices[0].message.content or "⚠️ Не удалось получить ответ."
+    except GroqAPIError as e:
+        logger.error(f"Groq APIError: {e}")
+        return "⚠️ Ошибка Groq API. Попробуйте позже."
+    except Exception as e:
+        logger.error(f"Groq error: {e}")
+        return "⚠️ Ошибка при обращении к Groq."
+    
+# Главная функция получения ответа с автоматическим переключением
 async def get_ai_response(user_id: int, user_text: str) -> str:
-    """Получает ответ от AI (текст)."""
+    """Получает ответ от AI с автоматическим переключением на Groq при ошибке Gemini."""
+    global current_ai_provider, last_gemini_error_time
+    
     history = get_history(user_id)
     history.append({"role": "user", "content": user_text})
     
@@ -255,11 +278,31 @@ async def get_ai_response(user_id: int, user_text: str) -> str:
         history = history[-MAX_HISTORY:]
         conversation_history[user_id] = history
 
-    reply = await get_gemini_response(user_id, user_text, history)
+    # Пытаемся получить ответ от текущего провайдера
+    reply = None
+    
+    if current_ai_provider == "gemini":
+        reply = await get_gemini_response(user_id, user_text, history)
+        # Проверяем, не вернула ли Gemini ошибку
+        if reply and "Ошибка Gemini API" in reply:
+            logger.warning("Gemini API ошибка, переключаемся на Groq")
+            current_ai_provider = "groq"
+            last_gemini_error_time = datetime.now()
+            # Повторяем запрос через Groq
+            reply = await get_groq_response(user_id, user_text, history)
+    else:
+        reply = await get_groq_response(user_id, user_text, history)
+    
     history.append({"role": "assistant", "content": reply})
     
     # Сохраняем ответ бота в БД
     save_message(user_id, "assistant", reply)
+    
+    # Если прошло больше часа с последней ошибки Gemini, пробуем вернуться
+    if current_ai_provider == "groq" and last_gemini_error_time:
+        if datetime.now() - last_gemini_error_time > timedelta(hours=1):
+            logger.info("Пробуем вернуться на Gemini")
+            current_ai_provider = "gemini"
     
     return reply
 
@@ -276,23 +319,29 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     """Обработчик команды /start."""
-    user_name = message.from_user.first_name or "друг"
-    user_id = message.from_user.id
-    conversation_history[user_id] = []
-    last_activity[user_id] = datetime.now()
+    try:
+        user_name = message.from_user.first_name or "друг"
+        user_id = message.from_user.id
+        conversation_history[user_id] = []
+        last_activity[user_id] = datetime.now()
 
-    await message.answer(
-        f"👋 Привет, <b>{user_name}</b>!\n\n"
-        "🎨 Я — AI-ассистент магазина <b>«Центр Красок #1»</b>.\n\n"
-        "Могу ответить на вопросы о:\n"
-        "• красках, лаках, штукатурках и инструментах\n"
-        "• брендах и акциях\n"
-        "• адресах и доставке\n"
-        "• услугах для дизайнеров и строителей\n\n"
-        "📸 Отправьте <b>фото помещения</b> — подберу подходящие материалы!\n\n"
-        "Просто напишите вопрос! ✍️\n\n"
-        "📞 <b>+7 (777) 292-84-01</b> · Пн–Вс 10:00–20:00"
-    )
+        await message.answer(
+            f"👋 Привет, <b>{user_name}</b>!\n\n"
+            "🎨 Я — AI-ассистент магазина <b>«Центр Красок #1»</b>.\n\n"
+            "Могу ответить на вопросы о:\n"
+            "• красках, лаках, штукатурках и инструментах\n"
+            "• брендах и акциях\n"
+            "• адресах и доставке\n"
+            "• услугах для дизайнеров и строителей\n\n"
+            "📸 Отправьте <b>фото помещения</b> — подберу подходящие материалы!\n\n"
+            "Просто напишите вопрос! ✍️\n\n"
+            "📞 <b>+7 (777) 292-84-01</b> · Пн–Вс 10:00–20:00"
+        )
+    except TelegramForbiddenError:
+        # Пользователь заблокировал бота — просто игнорируем
+        logger.warning(f"User {message.from_user.id} blocked the bot")
+    except Exception as e:
+        logger.error(f"Error in cmd_start: {e}")
 
 
 # Текстовые сообщения
@@ -328,10 +377,21 @@ async def handle_text(message: Message) -> None:
 @dp.message(F.photo)
 async def handle_photo(message: Message) -> None:
     """Обработчик фотографий."""
+    global current_ai_provider, last_gemini_error_time  # ← В САМОМ НАЧАЛЕ ФУНКЦИИ
+    
     user_id = message.from_user.id
 
     if not check_rate_limit(user_id):
         await message.answer("⏳ Слишком много запросов. Подождите немного.")
+        return
+
+    # Если сейчас используется Groq, предупреждаем
+    if current_ai_provider == "groq":
+        await message.answer(
+            "⚠️ Сейчас используется быстрая модель Groq, которая не поддерживает анализ фото.\n\n"
+            "Для анализа фото дождитесь восстановления Gemini или попробуйте позже.\n\n"
+            "А пока опишите словами, что видите на фото, и я помогу! 🎨"
+        )
         return
 
     photo = message.photo[-1]
@@ -357,7 +417,17 @@ async def handle_photo(message: Message) -> None:
         logger.info(f"[PHOTO] user={user_id}, size={len(image_bytes)} bytes")
 
         reply = await get_gemini_vision_response(user_id, image_b64, caption)
-        await message.answer(reply)
+        
+        # Если Gemini вернул ошибку, переключаемся
+        if reply and ("Ошибка" in reply or "Gemini" in reply):
+            current_ai_provider = "groq"
+            last_gemini_error_time = datetime.now()
+            await message.answer(
+                "⚠️ Анализ фото временно недоступен.\n"
+                "Переключаюсь на текстовый режим. Задайте вопрос текстом! 📝"
+            )
+        else:
+            await message.answer(reply)
         
     except Exception as e:
         logger.error(f"Photo processing error: {e}")
@@ -367,6 +437,7 @@ async def handle_photo(message: Message) -> None:
             "и я порекомендую подходящие материалы! 🎨"
         )
 
+        
 # Функция для запуска Flask админ-панели
 def run_flask():
     """Запускает Flask админ-панель в отдельном потоке."""
