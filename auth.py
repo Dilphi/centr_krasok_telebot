@@ -57,7 +57,7 @@ def create_first_admin():
     admins = get_all_admins()
     if not admins:
         default_username = "admin"
-        default_password = "admin123"
+        default_password = "2952"
         password_hash = hash_password(default_password)
         create_admin(default_username, password_hash)
         print(f"✅ Создан администратор по умолчанию: {default_username} / {default_password}")
