@@ -1,0 +1,14 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  telegram-bot:
+    build: .
+    container_name: centr_krasok_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Almaty

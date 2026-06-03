@@ -1,0 +1,20 @@
+.sidebar {
+    min-height: 100vh;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+}
+.sidebar .nav-link {
+    color: rgba(255,255,255,0.8);
+}
+.sidebar .nav-link:hover, .sidebar .nav-link.active {
+    color: white;
+    background: rgba(255,255,255,0.1);
+}
+.online-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 5px;
+}
+.online { background-color: #28a745; }
+.offline { background-color: #dc3545; }
